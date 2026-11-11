@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
-import { HL, HW, R, groupOf } from './config.js';
+import { HL, HW, R, A, B, groupOf } from './config.js';
 import * as physics from './physics.js';
 import { EightBall } from './rules.js';
 import { chooseShot, choosePlacement, validSpot, listShots } from './ai.js';
@@ -13,7 +13,7 @@ import { Sound } from './audio.js';
 
 // ---------------------------------------------------------------- settings
 const SKILLS = ['Easy', 'Medium', 'Hard'];
-const settings = Object.assign({ assist: true, move: 'stay', hand: 'right', skill: 1, tableY: 0.8 },
+const settings = Object.assign({ assist: true, move: 'stay', hand: 'right', skill: 1, tableY: 0.8, reach: 1, tilt: 0 },
   JSON.parse(localStorage.getItem('vrpool.settings') || '{}'));
 const save = () => localStorage.setItem('vrpool.settings', JSON.stringify(settings));
 const params = new URLSearchParams(location.search);
@@ -119,7 +119,7 @@ function findFree(x, z) {
   return { x, z };
 }
 function respot(b, x, z) {
-  b.potted = false; b.sink = 0; b.pocket = null; b.x = 9; b.z = 9;
+  b.potted = false; b.sink = 0; b.pocket = null; b.off = false; b.y = 0; b.vy = 0; b.x = 9; b.z = 9;
   const p = findFree(x, z);
   b.x = p.x; b.z = p.z; b.vx = b.vz = b.wx = b.wy = b.wz = 0;
   b.mesh.visible = true; b.shadow.visible = true;
@@ -134,12 +134,13 @@ function startGame(mode) {
   game.state = 'aim'; game.aiT = 0; game.aiShot = null; aiCue.visible = false;
   closeMenu();
   refreshBoard();
-  if (inVR()) lineUp();
+  if (inVR()) newLineup();
 }
 
-function shoot(dx, dz, V, a = 0, b = 0) {
+function shoot(dx, dz, V, a = 0, b = 0, vy = 0) {
   if (game.rules) game.rules.beginShot(balls);
-  physics.strike(cueBall, dx, dz, V, a, b);
+  physics.strike(cueBall, dx, dz, V, a, b, vy);
+  markBall.visible = markPocket.visible = false;
   game.state = 'moving'; game.settle = 0;
   assist.visible = false;
   sound.cue(V);
@@ -149,14 +150,20 @@ const events = {
   hit(p, q, s) { sound.ball(s); if (game.rules) game.rules.onHit(p, q); },
   cushion(b, s) { sound.cushion(s); if (game.rules) game.rules.onCushion(); },
   pocket(b) { sound.pocket(); if (game.rules) game.rules.onPocket(b); pulse(hand('cue'), 0.4, 60); },
+  land(b, s) { sound.land(s); },
+  off(b) { sound.offTable(); if (game.rules) game.rules.onOff(b); },
 };
+// Called whenever it becomes a human's turn to shoot.
+function humanToShoot() { if (inVR() && settings.move === 'stay' && game.state === 'aim' && humanTurn()) newLineup(); }
 
 function endShot() {
   game.aiT = 0; game.aiShot = null;
   if (game.practice) {
     if (cueBall.potted) respot(cueBall, -HL / 2, 0);
+    for (const b of balls) if (b.n > 0 && b.off) respot(b, HL / 2, 0);
     if (balls.every(b => b.n === 0 || b.potted)) rack(balls);
     game.state = 'aim';
+    humanToShoot();
     refreshBoard();
     return;
   }
@@ -179,16 +186,17 @@ function endShot() {
       game.state = 'aim';
     } else { game.state = 'place'; game.behindLine = false; }
   } else game.state = 'aim';
+  humanToShoot();
   refreshBoard();
 }
 
 function refreshBoard() {
   const vr = inVR();
-  let hint = vr ? 'Grip with your bridge hand to steady the cue.  B lines you up.  A opens the menu.'
+  let hint = vr ? 'Front trigger: anchor the cue.   B: next shot.   Stick: turn.   A: menu.'
     : 'Mouse aims.  Hold click for power.  W A S D for spin.  Right drag to look.  M for menu.';
   if (game.state === 'place') hint = vr ? 'Ball in hand: point at the table and pull the trigger.' : 'Ball in hand: click the table to place the cue ball.';
   if (game.practice || !game.rules) {
-    board.draw({ title: 'PRACTICE TABLE', players: [], cur: -1, msg: game.practice ? 'Shoot freely. The balls re-rack when the table is clear.' : 'Welcome to the club', hint });
+    board.draw({ title: 'PRACTICE TABLE', players: [], cur: -1, msg: game.practice ? (vr && lineup.label && game.state === 'aim' ? lineup.label : 'Shoot freely. The balls re-rack when the table is clear.') : 'Welcome to the club', hint });
     return;
   }
   const r = game.rules;
@@ -196,28 +204,41 @@ function refreshBoard() {
     name: r.names[p], group: r.groups[p],
     balls: r.groups[p] ? balls.filter(b => b.n > 0 && !b.potted && groupOf(b.n) === r.groups[p]).map(b => b.n).concat(balls[8].potted ? [] : (r.remaining(balls, p) === 0 ? [8] : [])) : [],
   }));
-  board.draw({ title: 'EIGHT BALL', players, cur: r.winner != null ? r.winner : r.cur, open: !r.groups[0], msg: r.msg, hint });
+  board.draw({ title: 'EIGHT BALL', players, cur: r.winner != null ? r.winner : r.cur, open: !r.groups[0], msg: r.msg, hint: vr && lineup.label && game.state === 'aim' && humanTurn() ? `${lineup.label}      B: next shot` : hint });
 }
 
 // ---------------------------------------------------------------- menu
+let menuPage = 'main';
 function buildMenu() {
   const inGame = game.state !== 'menu' && game.state !== 'over';
+  const items = [];
+  if (menuPage === 'setup') {
+    const REACH_NAMES = ['Short', 'Medium', 'Long'];
+    items.push({ label: 'Match table to my front hand', onClick: () => { matchTableToHand(); } });
+    items.push({ label: 'Table height', value: `${Math.round(settings.tableY * 100)} cm  (tap to raise)`, onClick: () => { settings.tableY = settings.tableY >= 1.1 ? 0.6 : settings.tableY + 0.025; table.userData.setHeight(settings.tableY); } });
+    items.push({ label: 'Recenter where I stand', onClick: () => { setHome(); if (game.state === 'aim') placeFromLineup(); } });
+    items.push({ label: 'Cue hand', value: settings.hand === 'right' ? 'Right' : 'Left', onClick: () => { settings.hand = settings.hand === 'right' ? 'left' : 'right'; } });
+    items.push({ label: 'Lean distance', value: REACH_NAMES[settings.reach], onClick: () => { settings.reach = (settings.reach + 1) % 3; if (game.state === 'aim') placeFromLineup(); } });
+    items.push({ label: 'Cue tilt in hand', value: `${settings.tilt > 0 ? '+' : ''}${settings.tilt} deg`, onClick: () => { settings.tilt = settings.tilt >= 40 ? -40 : settings.tilt + 10; } });
+    items.push({ label: 'Movement', value: settings.move === 'stay' ? 'Stay put' : 'Walk', onClick: () => { settings.move = settings.move === 'stay' ? 'walk' : 'stay'; } });
+    items.push({ label: 'Cue assist', value: settings.assist ? 'On' : 'Off', onClick: () => { settings.assist = !settings.assist; } });
+    items.push({ label: 'Done', onClick: () => { menuPage = 'main'; } });
+    menu.set('SETUP', 'Rest your front controller on your real table to match it', items);
+    return;
+  }
   let title = 'CORNER POCKET', sub = 'A private billiards club';
   if (game.state === 'over' && game.rules) { title = game.rules.winner === 0 && game.mode === 'ai' ? 'YOU WIN' : `${game.rules.names[game.rules.winner].toUpperCase()} WINS`; sub = 'Rack them up again?'; }
-  const items = [];
   if (inGame) items.push({ label: 'Back to the table', onClick: closeMenu });
   items.push({ label: 'Play the House', onClick: () => startGame('ai') });
   items.push({ label: 'House skill', value: SKILLS[settings.skill], onClick: () => { settings.skill = (settings.skill + 1) % 3; } });
   items.push({ label: 'Pass and play', onClick: () => startGame('pass') });
   items.push({ label: 'Practice table', onClick: () => startGame('practice') });
-  items.push({ label: 'Cue assist', value: settings.assist ? 'On' : 'Off', onClick: () => { settings.assist = !settings.assist; } });
-  items.push({ label: 'Movement', value: settings.move === 'stay' ? 'Stay put' : 'Walk', onClick: () => { settings.move = settings.move === 'stay' ? 'walk' : 'stay'; } });
-  items.push({ label: 'Cue hand', value: settings.hand === 'right' ? 'Right' : 'Left', onClick: () => { settings.hand = settings.hand === 'right' ? 'left' : 'right'; } });
-  items.push({ label: 'Table height', value: `${Math.round(settings.tableY * 100)} cm  (tap to raise)`, onClick: () => { settings.tableY = settings.tableY >= 0.95 ? 0.65 : settings.tableY + 0.05; table.userData.setHeight(settings.tableY); } });
+  items.push({ label: 'Setup: table, hands, comfort', onClick: () => { menuPage = 'setup'; } });
   menu.set(title, sub, items);
 }
 const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _q1 = new THREE.Quaternion();
 function openMenu() {
+  menuPage = 'main';
   buildMenu();
   menu.mesh.visible = true;
   if (inVR()) {
@@ -266,7 +287,7 @@ function tryPlace() {
 const ctrls = [0, 1].map(i => {
   const ray = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
   rig.add(ray, grip);
-  const o = { ray, grip, src: null, hand: null, down: [], edge: [], snap: false };
+  const o = { ray, grip, src: null, hand: null, down: [], edge: [], snap: false, ax: 0, ay: 0 };
   ray.addEventListener('connected', e => { o.src = e.data; o.hand = e.data.handedness; });
   ray.addEventListener('disconnected', () => { o.src = null; o.hand = null; });
   const glove = new THREE.Mesh(new THREE.SphereGeometry(0.026, 16, 12), new THREE.MeshStandardMaterial({ color: '#1a1412', roughness: 0.6 }));
@@ -296,34 +317,120 @@ function pulse(c, strength, ms) {
   if (act && act.pulse) act.pulse(Math.min(1, strength), ms).catch(() => {});
 }
 
+// A quick blink to black whenever the game moves you, which is far more comfortable than sliding.
+const blink = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+blink.renderOrder = 1000; blink.visible = false; camera.add(blink);
+function doBlink() { blink.material.opacity = 1; blink.visible = true; }
+
 function orbitRig(px, pz, ang) {
   const c = Math.cos(ang), s = Math.sin(ang);
   const dx = rig.position.x - px, dz = rig.position.z - pz;
   rig.position.x = px + dx * c + dz * s; rig.position.z = pz - dx * s + dz * c;
   rig.rotation.y += ang;
 }
-// Stand the player behind the cue ball, facing down the most promising shot.
-function lineUp() {
-  let dx = -cueBall.x, dz = -cueBall.z;
-  if (game.rules && game.rules.phase !== 'break') {
-    const shots = listShots(balls, cueBall.x, cueBall.z, game.rules.legalTargets(balls));
-    if (shots.length) { dx = shots[0].dx; dz = shots[0].dz; }
-  } else if (game.rules || game.practice) { dx = 1; dz = 0; }
-  const len = Math.hypot(dx, dz) || 1; dx /= len; dz /= len;
-  camera.getWorldPosition(_v1); camera.getWorldDirection(_v2);
-  const cur = Math.atan2(-_v2.x, -_v2.z), want = Math.atan2(-dx, -dz);
-  orbitRig(_v1.x, _v1.z, want - cur);
-  camera.getWorldPosition(_v1);
-  // Stand a stride behind the ball and slightly to the side of the cue line, like a real stance.
-  const side = settings.hand === 'right' ? -0.12 : 0.12;
-  const tx = cueBall.x - dx * 0.95 + -dz * side, tz = cueBall.z - dz * 0.95 + dx * side;
-  rig.position.x += tx - _v1.x; rig.position.z += tz - _v1.z;
+
+// ---------------------------------------------------------------- standing still: the table comes to you
+// "Home" is where you stand in your real room, facing your real table. Every shot moves the virtual
+// world so that this spot ends up behind the cue ball, just outside the rail, facing down the shot.
+const home = { x: 0, z: 0, yaw: 0 };
+function setHome() {
+  home.x = camera.position.x; home.z = camera.position.z;
+  _v2.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  home.yaw = Math.atan2(-_v2.x, -_v2.z);
+}
+function placePlayer(sx, sz, dx, dz) {
+  const ry = Math.atan2(-dx, -dz) - home.yaw;
+  const c = Math.cos(ry), s = Math.sin(ry);
+  rig.rotation.y = ry;
+  rig.position.x = sx - (home.x * c + home.z * s);
+  rig.position.z = sz - (-home.x * s + home.z * c);
   rig.updateMatrixWorld(true);
 }
+const OUT_X = A + 0.135, OUT_Z = B + 0.135;      // outside edge of the wooden rail
+const REACH = [0.88, 0.98, 1.1];
+// Where to stand for a shot along (dx, dz): outside the rail when the ball is close enough to reach,
+// otherwise as far back as a real lean allows.
+function standPoint(dx, dz, nudge) {
+  const cx = cueBall.x, cz = cueBall.z;
+  let s = Infinity;
+  if (dx > 1e-6) s = Math.min(s, (cx + OUT_X) / dx); else if (dx < -1e-6) s = Math.min(s, (cx - OUT_X) / dx);
+  if (dz > 1e-6) s = Math.min(s, (cz + OUT_Z) / dz); else if (dz < -1e-6) s = Math.min(s, (cz - OUT_Z) / dz);
+  let dist = Math.min(REACH[settings.reach], Math.max(0.62, s + 0.1)) + nudge;
+  dist = Math.max(0.5, Math.min(1.3, dist));
+  const side = settings.hand === 'right' ? 1 : -1;   // the body stands on the off side of the cue
+  return { x: cx - dx * dist + dz * side * 0.14, z: cz - dz * dist - dx * side * 0.14, dist };
+}
 
+const lineup = { list: [], idx: 0, yaw: 0, nudge: 0, markT: 0, label: '' };
+const markMat = new THREE.MeshBasicMaterial({ color: '#e8c987', transparent: true, opacity: 0, depthWrite: false });
+const markBall = new THREE.Mesh(new THREE.RingGeometry(R * 1.25, R * 1.5, 36).rotateX(-Math.PI / 2), markMat);
+const markPocket = new THREE.Mesh(new THREE.RingGeometry(0.07, 0.084, 36).rotateX(-Math.PI / 2), markMat);
+markBall.renderOrder = 2; markPocket.renderOrder = 2; markBall.visible = markPocket.visible = false;
+top.add(markBall, markPocket);
+
+function buildShotList() {
+  const out = [];
+  const add = (dx, dz, label, ball, pocket) => {
+    const yaw = Math.atan2(dz, dx);
+    for (const o of out) { let d = Math.abs(o.yaw - yaw); if (d > Math.PI) d = 2 * Math.PI - d; if (d < 0.05) return; }
+    out.push({ yaw, label, ball, pocket });
+  };
+  const isBreak = game.rules && game.rules.phase === 'break';
+  const targets = game.rules ? game.rules.legalTargets(balls) : balls.filter(b => b.n > 0 && !b.potted);
+  if (!isBreak) {
+    for (const s of listShots(balls, cueBall.x, cueBall.z, targets).slice(0, 12))
+      add(s.dx, s.dz, `${s.ball.n} ball, ${s.pocket.corner ? 'corner' : 'side'} pocket`, s.ball, s.pocket);
+  }
+  const near = targets.slice().sort((p, q) => Math.hypot(p.x - cueBall.x, p.z - cueBall.z) - Math.hypot(q.x - cueBall.x, q.z - cueBall.z));
+  for (const b of near.slice(0, isBreak ? 1 : 3)) {
+    const dx = b.x - cueBall.x, dz = b.z - cueBall.z, l = Math.hypot(dx, dz) || 1;
+    add(dx / l, dz / l, isBreak ? 'The break' : `Straight at the ${b.n} ball`, b, null);
+  }
+  if (!out.length) add(1, 0, 'Free aim', null, null);
+  return out.slice(0, 8);
+}
+function placeFromLineup() {
+  const dx = Math.cos(lineup.yaw), dz = Math.sin(lineup.yaw);
+  const p = standPoint(dx, dz, lineup.nudge);
+  placePlayer(p.x, p.z, dx, dz);
+}
+function applyLineup() {
+  const s = lineup.list[lineup.idx];
+  lineup.yaw = s.yaw; lineup.nudge = 0;
+  lineup.label = `Shot ${lineup.idx + 1} of ${lineup.list.length}:  ${s.label}`;
+  placeFromLineup();
+  markBall.visible = !!s.ball; markPocket.visible = !!s.pocket; lineup.markT = 3.5;
+  if (s.ball) markBall.position.set(s.ball.x, 0.003, s.ball.z);
+  if (s.pocket) markPocket.position.set(s.pocket.x, 0.043, s.pocket.z);
+  anchor.set = false;
+  doBlink();
+  refreshBoard();
+}
+// Stand behind the cue ball on the best shot. Calling it again steps to the next best.
+function newLineup() { lineup.list = buildShotList(); lineup.idx = 0; applyLineup(); }
+function nextLineup() {
+  if (!lineup.list.length) { newLineup(); return; }
+  lineup.idx = (lineup.idx + 1) % lineup.list.length; applyLineup();
+}
+function matchTableToHand() {
+  const fh = hand('bridge');
+  if (!fh) return;
+  fh.grip.getWorldPosition(_v1);
+  settings.tableY = Math.max(0.5, Math.min(1.25, _v1.y - 0.04));
+  table.userData.setHeight(settings.tableY);
+}
+
+// ---------------------------------------------------------------- VR cue handling
 const TIP_DIST = 1.08;      // tip sits this far ahead of the back hand
-const vr = { axis: new THREE.Vector3(0, 0, -1), tip: new THREE.Vector3(), lock: false, lockAxis: new THREE.Vector3(), lockPoint: new THREE.Vector3(), hist: [] };
-const pR = new THREE.Vector3(), pL = new THREE.Vector3(), tmpAxis = new THREE.Vector3(), prevTip = new THREE.Vector3();
+const vr = { axis: new THREE.Vector3(0, 0, -1), tip: new THREE.Vector3(), hist: [], handHist: [], axisHist: [],
+  frozen: false, fAxis: new THREE.Vector3(), fPoint: new THREE.Vector3() };
+// The anchor is the bridge: a fixed point the cue pivots on. It is stored in real-room coordinates,
+// because it stands for your front hand resting on your real table.
+const anchor = { set: false, local: new THREE.Vector3(), world: new THREE.Vector3() };
+const anchorMark = new THREE.Mesh(new THREE.TorusGeometry(0.02, 0.0035, 8, 24), new THREE.MeshStandardMaterial({ color: '#c9a45a', roughness: 0.3, metalness: 1 }));
+anchorMark.visible = false; scene.add(anchorMark);
+const pR = new THREE.Vector3(), pL = new THREE.Vector3(), tmpAxis = new THREE.Vector3(), prevTip = new THREE.Vector3(), useAxis = new THREE.Vector3();
 
 function updateVR(dt, time) {
   pollControllers();
@@ -331,6 +438,7 @@ function updateVR(dt, time) {
   const bh = hand('bridge');
   for (const c of ctrls) c.line.visible = false;
   pointer.ok = false;
+  anchorMark.visible = false;
   if (!ch) { playerCue.visible = false; return; }
 
   // Pointer ray from the cue hand.
@@ -338,34 +446,32 @@ function updateVR(dt, time) {
   pointer.dir.set(0, 0, -1).applyQuaternion(ch.ray.getWorldQuaternion(_q1)).normalize();
   pointer.ok = true;
 
+  const myShot = game.state === 'aim' && humanTurn();
   if (ch.edge[4]) { menu.mesh.visible ? closeMenu() : openMenu(); sound.ui(menu.mesh.visible); }
-  if (ch.edge[5] && !menu.mesh.visible) { lineUp(); sound.ui(); }
+  if (ch.edge[5] && !menu.mesh.visible && myShot) { nextLineup(); sound.ui(); }
 
-  // Turning and moving.
-  if (Math.abs(ch.ax) > 0.6) {
-    if (!ch.snap) { camera.getWorldPosition(_v1); orbitRig(_v1.x, _v1.z, -Math.sign(ch.ax) * Math.PI / 6); ch.snap = true; }
-  } else if (Math.abs(ch.ax) < 0.3) ch.snap = false;
-  if (bh && (Math.abs(bh.ax) > 0.15 || Math.abs(bh.ay) > 0.15)) {
-    camera.getWorldPosition(_v1);
-    if (settings.move === 'walk') {
+  const sx = ch.ax + (bh ? bh.ax : 0), sy = ch.ay + (bh ? bh.ay : 0);
+  if (settings.move === 'stay') {
+    // Either stick turns you around the cue ball for fine aim and bank shots, or steps you in and out.
+    if (myShot && !menu.mesh.visible && (Math.abs(sx) > 0.15 || Math.abs(sy) > 0.25)) {
+      if (Math.abs(sx) > 0.15) lineup.yaw += sx * Math.abs(sx) * 1.1 * dt;
+      if (Math.abs(sy) > 0.25) lineup.nudge = Math.max(-0.25, Math.min(0.3, lineup.nudge + sy * 0.35 * dt));
+      placeFromLineup();
+    }
+  } else {
+    if (Math.abs(ch.ax) > 0.6) {
+      if (!ch.snap) { camera.getWorldPosition(_v1); orbitRig(_v1.x, _v1.z, -Math.sign(ch.ax) * Math.PI / 6); ch.snap = true; }
+    } else if (Math.abs(ch.ax) < 0.3) ch.snap = false;
+    if (bh && (Math.abs(bh.ax) > 0.15 || Math.abs(bh.ay) > 0.15)) {
       camera.getWorldDirection(_v2); _v2.y = 0; _v2.normalize();
       const sp = 1.4 * dt;
       rig.position.x += (_v2.x * -bh.ay + -_v2.z * bh.ax) * sp;
       rig.position.z += (_v2.z * -bh.ay + _v2.x * bh.ax) * sp;
-    } else {
-      // Stay put: glide around the cue ball instead of walking around the table.
-      const px = cueBall.potted ? 0 : cueBall.x, pz = cueBall.potted ? 0 : cueBall.z;
-      orbitRig(px, pz, -bh.ax * 1.3 * dt);
-      const ox = rig.position.x, oz = rig.position.z;
+      const bnd = room.userData.bounds;
       camera.getWorldPosition(_v1);
-      const rx = _v1.x - px, rz = _v1.z - pz, rl = Math.hypot(rx, rz) || 1;
-      const mv = bh.ay * 0.9 * dt;
-      if (rl + mv > 0.25) { rig.position.x = ox + (rx / rl) * mv; rig.position.z = oz + (rz / rl) * mv; }
+      rig.position.x += Math.max(-bnd.x, Math.min(bnd.x, _v1.x)) - _v1.x;
+      rig.position.z += Math.max(-bnd.z, Math.min(bnd.z, _v1.z)) - _v1.z;
     }
-    const bnd = room.userData.bounds;
-    camera.getWorldPosition(_v1);
-    rig.position.x += Math.max(-bnd.x, Math.min(bnd.x, _v1.x)) - _v1.x;
-    rig.position.z += Math.max(-bnd.z, Math.min(bnd.z, _v1.z)) - _v1.z;
   }
 
   // Menu and ball in hand use the laser.
@@ -379,54 +485,79 @@ function updateVR(dt, time) {
   if (game.state === 'place' && humanTurn()) {
     ch.line.visible = true; playerCue.visible = false; assist.visible = false;
     tryPlace();
-    if (ch.edge[0]) { game.state = 'aim'; sound.ui(); refreshBoard(); }
+    if (ch.edge[0]) { game.state = 'aim'; sound.ui(); if (settings.move === 'stay') newLineup(); refreshBoard(); }
     return;
   }
 
-  // Cue pose. The back hand holds the cue; gripping with the other hand makes it the bridge.
+  // Front hand: trigger drops the anchor where the hand is, grip lifts it and bridges freely.
+  if (bh && bh.edge[0]) {
+    bh.grip.getWorldPosition(anchor.world);
+    anchor.local.copy(anchor.world); rig.worldToLocal(anchor.local);
+    anchor.set = true; pulse(bh, 0.6, 30); sound.ui();
+  }
+  if (bh && bh.edge[1]) anchor.set = false;
+  if (anchor.set) { anchor.world.copy(anchor.local); rig.localToWorld(anchor.world); }
+  const bridging = !anchor.set && bh && bh.down[1];
+
+  // Cue line. The cue always runs through the back hand. With an anchor or a bridge it also runs
+  // through that point; otherwise it follows the handle of the back controller, like a held rod.
   playerCue.visible = true;
   ch.grip.getWorldPosition(pR);
-  const bridging = bh && bh.down[1];
-  const locking = bh && bh.down[0];
-  if (!(locking && vr.lock)) {
-    if (bridging) {
-      bh.grip.getWorldPosition(pL);
-      tmpAxis.copy(pL).sub(pR);
-      if (tmpAxis.length() < 0.18) tmpAxis.copy(pointer.dir); else tmpAxis.normalize();
-    } else tmpAxis.copy(pointer.dir);
-    vr.axis.lerp(tmpAxis, 1 - Math.exp(-dt * (bridging ? 40 : 22))).normalize();
-    if (locking) { vr.lock = true; vr.lockAxis.copy(vr.axis); vr.lockPoint.copy(pR); pulse(bh, 0.3, 20); } else vr.lock = false;
+  let twoPoint = false;
+  if (anchor.set) { tmpAxis.copy(anchor.world).sub(pR); twoPoint = true; }
+  else if (bridging) { bh.grip.getWorldPosition(pL); tmpAxis.copy(pL).sub(pR); twoPoint = true; }
+  if (twoPoint && tmpAxis.length() < 0.15) twoPoint = false;
+  if (twoPoint) tmpAxis.normalize();
+  else {
+    const t = (settings.tilt * Math.PI) / 180;
+    tmpAxis.set(0, Math.sin(t), -Math.cos(t)).applyQuaternion(ch.grip.getWorldQuaternion(_q1)).normalize();
   }
+  vr.axis.lerp(tmpAxis, 1 - Math.exp(-dt * (twoPoint ? 32 : 18))).normalize();
+
+  // Stroke steadying: once the back hand drives forward, hold the line you had just before, so the
+  // ball goes where the assist line showed and a wobble in the delivery does not spoil the shot.
+  vr.handHist.push({ t: time, p: pR.clone() }); while (vr.handHist.length > 6) vr.handHist.shift();
+  vr.axisHist.push({ t: time, a: vr.axis.clone() }); while (vr.axisHist.length > 14) vr.axisHist.shift();
+  const hh = vr.handHist[0], hspan = time - hh.t;
+  const handSpeed = hspan > 0.005 ? _v1.copy(pR).sub(hh.p).dot(vr.axis) / hspan : 0;
+  if (!vr.frozen && handSpeed > 0.35) {
+    let pick = vr.axisHist[0];
+    for (const e of vr.axisHist) if (time - e.t >= 0.09) pick = e;
+    vr.frozen = true; vr.fAxis.copy(pick.a);
+    vr.fPoint.copy(anchor.set ? anchor.world : bridging ? pL : hh.p);
+  } else if (vr.frozen && handSpeed < 0.08) vr.frozen = false;
+
   prevTip.copy(vr.tip);
-  if (vr.lock) {
-    const s = _v1.copy(pR).sub(vr.lockPoint).dot(vr.lockAxis);
-    vr.axis.copy(vr.lockAxis);
-    vr.tip.copy(vr.lockPoint).addScaledVector(vr.lockAxis, s + TIP_DIST);
-  } else vr.tip.copy(pR).addScaledVector(vr.axis, TIP_DIST);
-  poseCue(playerCue, vr.tip, vr.axis);
+  if (vr.frozen) {
+    useAxis.copy(vr.fAxis);
+    vr.tip.copy(vr.fPoint).addScaledVector(useAxis, _v1.copy(pR).sub(vr.fPoint).dot(useAxis) + TIP_DIST);
+  } else { useAxis.copy(vr.axis); vr.tip.copy(pR).addScaledVector(useAxis, TIP_DIST); }
+  poseCue(playerCue, vr.tip, useAxis);
+  if (anchor.set) {
+    anchorMark.visible = true; anchorMark.position.copy(anchor.world);
+    anchorMark.quaternion.setFromUnitVectors(_v1.set(0, 0, 1), useAxis);
+  }
 
   // Speed of the tip along the cue, averaged over the last few frames.
   vr.hist.push({ t: time, p: vr.tip.clone() });
   while (vr.hist.length > 5) vr.hist.shift();
   const h0 = vr.hist[0];
   const span = time - h0.t;
-  const speed = span > 0.005 ? _v1.copy(vr.tip).sub(h0.p).dot(vr.axis) / span : 0;
+  const speed = span > 0.005 ? _v1.copy(vr.tip).sub(h0.p).dot(useAxis) / span : 0;
 
-  if (game.state !== 'aim' || !humanTurn()) { assist.visible = false; return; }
+  if (!myShot) { assist.visible = false; return; }
 
-  // Everything below is in table space.
   const ty = settings.tableY;
   const cx = cueBall.x, cy = ty + R, cz = cueBall.z;
-  const hl = Math.hypot(vr.axis.x, vr.axis.z);
-  if (hl < 0.3) { assist.visible = false; return; }
-  const dx = vr.axis.x / hl, dz = vr.axis.z / hl;
+  const hl = Math.hypot(useAxis.x, useAxis.z);
+  if (hl < 0.2) { assist.visible = false; return; }
+  const dx = useAxis.x / hl, dz = useAxis.z / hl;
   // Where the cue line passes the ball centre: that offset is the english.
   _v1.set(vr.tip.x - cx, vr.tip.y - cy, vr.tip.z - cz);
-  const along = _v1.dot(vr.axis);
-  _v2.copy(_v1).addScaledVector(vr.axis, -along);     // perpendicular offset of the line from the centre
+  const along = _v1.dot(useAxis);
+  _v2.copy(_v1).addScaledVector(useAxis, -along);
   const off = _v2.length();
-  const tipDist = _v1.length();
-  if (off < R * 2.4 && along < 0.05 && tipDist < 0.75) showAssist(dx, dz); else assist.visible = false;
+  if (off < R * 2.6 && along < 0.05 && _v1.length() < 0.8) showAssist(dx, dz); else assist.visible = false;
 
   // Did the tip pass through the cue ball this frame?
   _v3.copy(vr.tip).sub(prevTip);
@@ -436,19 +567,24 @@ function updateVR(dt, time) {
   _v1.copy(prevTip).addScaledVector(_v3, t);
   const hitDist = Math.hypot(_v1.x - cx, _v1.y - cy, _v1.z - cz);
   if (hitDist < R + 0.007 && speed > 0.14) {
-    // Recompute the offset at the contact point.
     _v1.set(vr.tip.x - cx, vr.tip.y - cy, vr.tip.z - cz);
-    _v2.copy(_v1).addScaledVector(vr.axis, -_v1.dot(vr.axis));
+    _v2.copy(_v1).addScaledVector(useAxis, -_v1.dot(useAxis));
     let a = _v2.x * -dz + _v2.z * dx, b = _v2.y;
     const o = Math.hypot(a, b);
-    let V = Math.min(9.5, speed * 1.3);
-    let sx = dx, sz = dz;
-    if (o > R * 0.9) {           // miscue
-      V *= 0.35; const k = (Math.random() - 0.5) * 0.5; sx = dx * Math.cos(k) - dz * Math.sin(k); sz = dx * Math.sin(k) + dz * Math.cos(k); a = b = 0;
+    const V = Math.min(8.5, speed * 1.1);
+    let Vh = V * hl, sx2 = dx, sz2 = dz, vy = 0;
+    const down = -useAxis.y;                         // how steeply the cue points into the table
+    if (down > 0.38 && V * down > 1.0) {
+      vy = 0.6 * V * down;                            // jump shot: the ball is driven into the slate and rebounds
+      if (o > R * 0.55) { a *= (R * 0.55) / o; b *= (R * 0.55) / o; }
+    } else if (b < -R * 0.58 && Math.abs(a) < R * 0.6 && V > 2.2) {
+      vy = Math.min(2.6, V * 0.32); Vh *= 0.8; a = 0; b = -R * 0.3;   // dug under the ball: it hops
+    } else if (o > R * 0.9) {                         // miscue
+      Vh *= 0.35; const k = (Math.random() - 0.5) * 0.5; sx2 = dx * Math.cos(k) - dz * Math.sin(k); sz2 = dx * Math.sin(k) + dz * Math.cos(k); a = b = 0;
     } else if (o > R * 0.55) { a *= (R * 0.55) / o; b *= (R * 0.55) / o; }
-    shoot(sx, sz, V, a, b);
-    pulse(ch, 0.25 + V / 8, 45 + V * 8);
-    vr.hist.length = 0;
+    shoot(sx2, sz2, Vh, a, b, vy);
+    pulse(ch, 0.35 + V / 6, 40 + V * 9);
+    vr.hist.length = 0; vr.frozen = false; anchor.set = false;
   }
 }
 
@@ -563,6 +699,15 @@ renderer.setAnimationLoop(() => {
   }
   updateAI(dt);
   syncBalls(balls, dt);
+  let rollSum = 0;
+  if (game.state === 'moving') for (const b of balls) if (!b.potted && b.y <= 0) rollSum += Math.hypot(b.vx, b.vz);
+  sound.rolling(rollSum);
+  if (blink.visible) { blink.material.opacity -= dt * 4.5; if (blink.material.opacity <= 0) { blink.material.opacity = 0; blink.visible = false; } }
+  if (lineup.markT > 0) {
+    lineup.markT -= dt;
+    markMat.opacity = Math.max(0, Math.min(0.9, lineup.markT)) * (0.75 + 0.25 * Math.sin(time * 6));
+    if (lineup.markT <= 0) markBall.visible = markPocket.visible = false;
+  }
   if (game.state !== lastState) { lastState = game.state; refreshBoard(); }
   renderer.render(scene, camera);
 });
@@ -582,7 +727,8 @@ async function enterVR() {
     landing.style.display = 'none'; powerEl.style.display = 'none';
     rig.position.set(-HL - 1.1, 0, 0.0); rig.rotation.set(0, -Math.PI / 2, 0);
     camera.position.set(0, 0, 0); camera.rotation.set(0, 0, 0);
-    setTimeout(() => { if (game.state === 'menu' || game.state === 'over') openMenu(); refreshBoard(); }, 600);
+    // Give the headset a moment to report where you are standing, then treat that spot as home.
+    setTimeout(() => { setHome(); if (game.state === 'aim' && humanTurn()) newLineup(); if (game.state === 'menu' || game.state === 'over') openMenu(); refreshBoard(); }, 700);
     session.addEventListener('end', () => {
       rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);
       landing.style.display = 'flex'; menu.mesh.visible = false; refreshBoard();
@@ -601,4 +747,4 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
 refreshBoard();
 if (params.has('demo')) { landing.style.display = 'none'; startGame('demo'); }
 if (params.has('mode')) { landing.style.display = 'none'; startGame(params.get('mode')); }
-window.__game = { fake, ctrls, rig, vr, menu, lineUp, game, balls, settings, shoot, startGame, physics, desk, openMenu, closeMenu, camera, renderer, scene };
+window.__game = { fake, ctrls, rig, vr, menu, newLineup, nextLineup, lineup, anchor, home, setHome, sound, game, balls, settings, shoot, startGame, physics, desk, openMenu, closeMenu, camera, renderer, scene };

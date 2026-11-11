@@ -65,7 +65,8 @@ export function createBalls(parent) {
 
 export function rack(balls) {
   for (const b of balls) {
-    b.potted = false; b.sink = 0; b.pocket = null;
+    b.potted = false; b.sink = 0; b.pocket = null; b.off = false;
+    b.y = 0; b.vy = 0;
     b.vx = b.vz = b.wx = b.wy = b.wz = 0;
     b.mesh.visible = true; b.shadow.visible = true;
     b.mesh.quaternion.setFromEuler(new THREE.Euler(Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28));
@@ -98,6 +99,7 @@ const _axis = new THREE.Vector3(), _q = new THREE.Quaternion();
 export function syncBalls(balls, dt) {
   for (const b of balls) {
     if (b.potted) {
+      if (b.off && b.mesh.visible) { b.mesh.visible = false; b.shadow.visible = false; }
       if (b.sink > 0 && b.mesh.visible) {
         // Drop into the pocket.
         b.sink += dt;
@@ -110,8 +112,11 @@ export function syncBalls(balls, dt) {
       }
       continue;
     }
-    b.mesh.position.set(b.x, R, b.z);
+    b.mesh.position.set(b.x, R + b.y, b.z);
     b.shadow.position.set(b.x, 0.0012, b.z);
+    const sh = 1 + b.y * 6;
+    b.shadow.scale.set(sh, 1, sh);
+    b.shadow.visible = b.y < 0.25;
     const w = Math.hypot(b.wx, b.wy, b.wz);
     if (w > 1e-4) {
       _axis.set(b.wx / w, b.wy / w, b.wz / w);

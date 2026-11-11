@@ -4,10 +4,13 @@ import { HL, HW, R, POCKETS, MOUTH_C, MOUTH_S } from './config.js';
 
 const G = 9.81;
 const MU_SLIDE = 0.2;      // ball on cloth while sliding
-const MU_ROLL = 0.015;     // rolling resistance
+const MU_ROLL = 0.014;     // rolling resistance
 const SPIN_DECEL = 11;     // rad/s^2 decay of side spin
-const E_BALL = 0.95;       // ball to ball restitution
-const E_CUSHION = 0.85;    // cushion restitution
+const E_BALL = 0.94;       // ball to ball restitution
+const MU_BALL = 0.06;      // ball to ball friction (throw and spin transfer)
+const E_SLATE = 0.5;       // bounce of a ball landing on the slate
+const RAIL_CLEAR = 0.03;   // a ball this high clears the cushion nose
+const E_CUSHION = 0.8;     // cushion restitution at low speed
 const CUSHION_GRIP = 0.14; // how much the cushion grabs side spin and sliding speed
 
 // Cushion noses as line segments with inward normals.
@@ -19,11 +22,11 @@ for (const s of [-1, 1]) {
 }
 
 export function makeBall(n) {
-  return { n, x: 0, z: 0, vx: 0, vz: 0, wx: 0, wy: 0, wz: 0, potted: false, sink: 0, pocket: null };
+  return { n, x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, wx: 0, wy: 0, wz: 0, potted: false, sink: 0, pocket: null, off: false };
 }
 
 export function isMoving(b) {
-  return !b.potted && (b.vx !== 0 || b.vz !== 0 || b.wy !== 0 || Math.abs(b.wx) + Math.abs(b.wz) > 0.01);
+  return !b.potted && (b.vx !== 0 || b.vz !== 0 || b.wy !== 0 || b.y > 0 || b.vy !== 0 || Math.abs(b.wx) + Math.abs(b.wz) > 0.01);
 }
 
 export function anyMoving(balls) {
@@ -31,16 +34,49 @@ export function anyMoving(balls) {
   return false;
 }
 
-// Strike the cue ball: direction (dx, dz), speed V, tip offset a (right) and b (up) in metres.
-export function strike(cue, dx, dz, V, a = 0, b = 0) {
+// Strike the cue ball: direction (dx, dz), speed V, tip offset a (right) and b (up) in metres,
+// and an optional upward launch speed for jump shots.
+export function strike(cue, dx, dz, V, a = 0, b = 0, vy = 0) {
   const k = (2.5 * V) / (R * R);
   cue.vx = dx * V; cue.vz = dz * V;
   cue.wy = a * k;
   cue.wx = b * k * dz;
   cue.wz = -b * k * dx;
+  cue.vy = vy > 0 ? vy : 0;
 }
 
-function motion(b, h) {
+// A ball in the air: gravity only, then a bounce on the slate that grips the spin.
+function flight(b, h, ev) {
+  b.vy -= G * h;
+  b.y += b.vy * h;
+  b.x += b.vx * h; b.z += b.vz * h;
+  if (b.y > 0) return;
+  b.y = 0;
+  const down = -b.vy;
+  if (Math.abs(b.x) > HL + 0.012 || Math.abs(b.z) > HW + 0.012) {
+    // Came down beyond the cushions: it has left the table.
+    b.potted = true; b.off = true; b.sink = 0; b.vy = 0;
+    const speed = Math.hypot(b.vx, b.vz);
+    b.vx = b.vz = b.wx = b.wy = b.wz = 0;
+    if (ev && ev.off) ev.off(b, speed);
+    return;
+  }
+  if (down > 0.3) {
+    // Landing grips the cloth: the slip at the contact point is partly killed in one hit.
+    const ux = b.vx + R * b.wz, uz = b.vz - R * b.wx, u = Math.hypot(ux, uz);
+    if (u > 1e-4) {
+      const J = Math.min(MU_SLIDE * (1 + E_SLATE) * down, u / 3.5);
+      const ax = (-J * ux) / u, az = (-J * uz) / u;
+      b.vx += ax; b.vz += az;
+      b.wx -= (2.5 / R) * az; b.wz += (2.5 / R) * ax;
+    }
+    b.vy = down * E_SLATE;
+    if (ev && ev.land) ev.land(b, down);
+  } else b.vy = 0;
+}
+
+function motion(b, h, ev) {
+  if (b.y > 0 || b.vy > 0) { flight(b, h, ev); return; }
   const ux = b.vx + R * b.wz, uz = b.vz - R * b.wx;
   const u = Math.hypot(ux, uz);
   if (u > 3.5 * MU_SLIDE * G * h) {
@@ -73,7 +109,7 @@ function bounce(b, nx, nz, ev) {
   vt += dv;
   b.wy += (2.5 * dv) / R;
   // Softer rebound on hard hits, like real rubber.
-  const e = E_CUSHION * (1 - Math.min(0.15, -vn * 0.02));
+  const e = Math.max(0.55, E_CUSHION - 0.035 * -vn);
   const out = -e * vn;
   b.vx = vt * tx + out * nx; b.vz = vt * tz + out * nz;
   // The cushion nose sits above the ball's centre, so it kills most of the roll into the rail
@@ -87,6 +123,7 @@ function bounce(b, nx, nz, ev) {
 }
 
 function cushions(b, ev) {
+  if (b.y > RAIL_CLEAR) return;
   for (const s of SEGMENTS) {
     const rx = b.x - s.ax, rz = b.z - s.az;
     const d = rx * s.nx + rz * s.nz;
@@ -111,12 +148,13 @@ function cushions(b, ev) {
 }
 
 function pockets(b, ev) {
+  if (b.y > 0.02) return;
   let hit = null;
   for (const p of POCKETS) {
     const dx = b.x - p.x, dz = b.z - p.z;
     if (dx * dx + dz * dz < p.r * p.r) { hit = p; break; }
   }
-  if (!hit && (Math.abs(b.x) > HL + R * 0.6 || Math.abs(b.z) > HW + R * 0.6)) {
+  if (!hit && b.y <= 0 && (Math.abs(b.x) > HL + R * 0.6 || Math.abs(b.z) > HW + R * 0.6)) {
     let best = Infinity;
     for (const p of POCKETS) { const d = Math.hypot(b.x - p.x, b.z - p.z); if (d < best) { best = d; hit = p; } }
   }
@@ -128,33 +166,55 @@ function pockets(b, ev) {
   }
 }
 
+function collide(p, q, ev) {
+  const dx = q.x - p.x, dz = q.z - p.z, dy = q.y - p.y;
+  const d2 = dx * dx + dz * dz + dy * dy;
+  if (d2 >= 4 * R * R || d2 < 1e-12) return;
+  const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, nz = dz / d;
+  const push = (2 * R - d) / 2;
+  p.x -= nx * push; p.z -= nz * push; q.x += nx * push; q.z += nz * push;
+  if (ny !== 0) { p.y = Math.max(0, p.y - ny * push); q.y = Math.max(0, q.y + ny * push); }
+  const rvx = q.vx - p.vx, rvy = q.vy - p.vy, rvz = q.vz - p.vz;
+  const vn = rvx * nx + rvy * ny + rvz * nz;
+  if (vn >= 0) return;
+  const jn = (-(1 + E_BALL) * vn) / 2;
+  // Surface slip at the contact point, spins included. Friction here is what throws the object
+  // ball slightly off line and passes a little spin across.
+  const sx = p.wx + q.wx, sy = p.wy + q.wy, sz = p.wz + q.wz;
+  let tx = rvx - R * (sy * nz - sz * ny), ty = rvy - R * (sz * nx - sx * nz), tz = rvz - R * (sx * ny - sy * nx);
+  const tn = tx * nx + ty * ny + tz * nz;
+  tx -= tn * nx; ty -= tn * ny; tz -= tn * nz;
+  const tl = Math.hypot(tx, ty, tz);
+  let fx = 0, fy = 0, fz = 0;
+  if (tl > 1e-5) {
+    const jt = Math.min(MU_BALL * jn, tl / 7);
+    fx = (-jt * tx) / tl; fy = (-jt * ty) / tl; fz = (-jt * tz) / tl;
+  }
+  const air = p.y > 0 || q.y > 0 || p.vy !== 0 || q.vy !== 0;
+  p.vx -= jn * nx + fx; p.vz -= jn * nz + fz;
+  q.vx += jn * nx + fx; q.vz += jn * nz + fz;
+  if (air) { p.vy -= jn * ny + fy; q.vy += jn * ny + fy; if (p.y <= 0 && p.vy < 0) p.vy = 0; if (q.y <= 0 && q.vy < 0) q.vy = 0; }
+  // Both balls feel the same torque from the friction impulse.
+  const k = 2.5 / R;
+  const cx = ny * fz - nz * fy, cy = nz * fx - nx * fz, cz = nx * fy - ny * fx;
+  p.wx -= k * cx; p.wy -= k * cy; p.wz -= k * cz;
+  q.wx -= k * cx; q.wy -= k * cy; q.wz -= k * cz;
+  if (ev && ev.hit) ev.hit(p, q, -vn);
+}
+
 function substep(balls, h, ev) {
   const n = balls.length;
-  for (let i = 0; i < n; i++) { const b = balls[i]; if (!b.potted) motion(b, h); }
+  for (let i = 0; i < n; i++) { const b = balls[i]; if (!b.potted) motion(b, h, ev); }
   for (let i = 0; i < n; i++) {
     const p = balls[i]; if (p.potted) continue;
-    for (let j = i + 1; j < n; j++) {
-      const q = balls[j]; if (q.potted) continue;
-      const dx = q.x - p.x, dz = q.z - p.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 >= 4 * R * R || d2 < 1e-12) continue;
-      const d = Math.sqrt(d2), nx = dx / d, nz = dz / d;
-      const push = (2 * R - d) / 2;
-      p.x -= nx * push; p.z -= nz * push; q.x += nx * push; q.z += nz * push;
-      const vn = (q.vx - p.vx) * nx + (q.vz - p.vz) * nz;
-      if (vn < 0) {
-        const j2 = (-(1 + E_BALL) * vn) / 2;
-        p.vx -= j2 * nx; p.vz -= j2 * nz; q.vx += j2 * nx; q.vz += j2 * nz;
-        if (ev && ev.hit) ev.hit(p, q, -vn);
-      }
-    }
+    for (let j = i + 1; j < n; j++) { const q = balls[j]; if (!q.potted) collide(p, q, ev); }
   }
   for (let i = 0; i < n; i++) { const b = balls[i]; if (!b.potted) { cushions(b, ev); pockets(b, ev); } }
 }
 
 export function step(balls, dt, ev) {
   let vmax = 0;
-  for (const b of balls) if (!b.potted) vmax = Math.max(vmax, Math.hypot(b.vx, b.vz));
+  for (const b of balls) if (!b.potted) vmax = Math.max(vmax, Math.hypot(b.vx, b.vz), Math.abs(b.vy));
   const n = Math.max(2, Math.min(60, Math.ceil((vmax * dt) / (R * 0.3))));
   const h = dt / n;
   for (let i = 0; i < n; i++) substep(balls, h, ev);

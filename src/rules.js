@@ -27,7 +27,7 @@ export class EightBall {
   }
 
   beginShot(balls) {
-    this.shot = { first: null, potted: [], railAfter: false, legal: this.legalTargets(balls).map(b => b.n) };
+    this.shot = { first: null, potted: [], railAfter: false, off: false, legal: this.legalTargets(balls).map(b => b.n) };
   }
   onHit(a, b) {
     const s = this.shot; if (!s) return;
@@ -35,6 +35,7 @@ export class EightBall {
   }
   onCushion() { const s = this.shot; if (s && s.first != null) s.railAfter = true; }
   onPocket(b) { if (this.shot) this.shot.potted.push(b.n); }
+  onOff(b) { if (this.shot) { this.shot.potted.push(b.n); this.shot.off = true; } }
 
   // Returns { foul, over, respot8, ballInHand, switched }.
   endShot() {
@@ -45,7 +46,8 @@ export class EightBall {
     const eight = s.potted.includes(8);
     const others = s.potted.filter(n => n !== 0 && n !== 8);
     let foul = null;
-    if (scratch) foul = 'Scratch';
+    if (scratch) foul = s.off ? 'Cue ball off the table' : 'Scratch';
+    else if (s.off) foul = 'Ball off the table';
     else if (s.first == null) foul = 'No ball hit';
     else if (!isBreak && !s.legal.includes(s.first)) foul = 'Wrong ball hit first';
     else if (!isBreak && s.potted.length === 0 && !s.railAfter) foul = 'No rail after contact';

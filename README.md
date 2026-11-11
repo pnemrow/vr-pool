@@ -10,16 +10,19 @@ To run it locally: `python3 -m http.server 8000` in this folder, then open `http
 
 ### VR controls
 
+The game is built to be played standing still in front of a real table or desk. Stand where you will play, facing your table, when you enter VR. In the menu under Setup, rest your front controller on the real table and choose "Match table to my front hand" so the cloth sits at that height.
+
 | Control | What it does |
 | --- | --- |
-| Cue hand | Holds the cue. Stroke through the cue ball to shoot. |
-| Bridge hand grip | Makes that hand the bridge, so the cue pivots on it. |
-| Bridge hand trigger | Locks the aim line so the cue only slides forward and back. |
-| Cue hand trigger | Selects menu items and places the cue ball. |
-| A | Opens and closes the menu. |
-| B | Lines you up behind the cue ball, facing the best shot. |
-| Cue hand stick | Turns you in 30 degree steps. |
-| Bridge hand stick | Glides around the cue ball (stay put) or walks (walk mode). |
+| Back hand | Holds the cue. The cue follows the handle of the controller. Stroke through the cue ball to shoot. |
+| Front hand trigger | Drops an anchor where that hand is. The cue pivots on it, so the back hand sets aim and spin. Pull again to move it. |
+| Front hand grip | Lifts the anchor. Hold it to bridge freely with the hand instead. |
+| B | Stands you behind the cue ball on the best shot. Press again for the next best. |
+| Either stick, left and right | Turns you around the cue ball for fine aim and bank shots. |
+| Either stick, up and down | Steps you closer to or further from the ball. |
+| A | Opens and closes the menu. Point with the back hand and pull its trigger to choose. |
+
+Hit low and hard to make the cue ball hop, or raise the back hand and strike down for a jump shot.
 
 ### Desktop controls
 
