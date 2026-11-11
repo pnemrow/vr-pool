@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Corner Pocket VR</title>
+<meta name="description" content="A VR pool hall for the Meta Quest browser.">
+<style>
+  html, body { margin: 0; height: 100%; background: #050302; overflow: hidden; color: #efe4cc; font-family: Georgia, "Times New Roman", serif; }
+  canvas { display: block; }
+  #landing { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 24px;
+    background: radial-gradient(ellipse at 50% 35%, rgba(22,60,42,0.82), rgba(5,3,2,0.95) 68%); }
+  #landing h1 { font-size: clamp(40px, 8vw, 84px); margin: 0; font-weight: 600; letter-spacing: 0.14em; color: #c9a45a; }
+  #landing .rule { width: 220px; height: 1px; background: #c9a45a; opacity: 0.7; }
+  #landing p { margin: 0; font-style: italic; font-size: clamp(16px, 2.4vw, 22px); opacity: 0.85; max-width: 34em; }
+  .btns { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+  button { font: inherit; font-size: 20px; letter-spacing: 0.08em; padding: 16px 34px; border-radius: 6px; cursor: pointer; border: 1px solid #c9a45a; background: #c9a45a; color: #120d09; }
+  button.ghost { background: transparent; color: #efe4cc; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  #note { font-size: 16px; opacity: 0.7; min-height: 1.4em; }
+  #power { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); display: none; pointer-events: none; }
+  #power .row { display: flex; align-items: center; gap: 14px; }
+  #bar { width: 260px; height: 10px; border: 1px solid #c9a45a; border-radius: 6px; overflow: hidden; background: rgba(0,0,0,0.5); }
+  #powerFill { height: 100%; width: 0; background: linear-gradient(90deg, #c9a45a, #c8402a); }
+  #spin { width: 44px; height: 44px; border-radius: 50%; background: #efe4cc; position: relative; box-shadow: 0 0 0 1px #c9a45a; }
+  #spinDot { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: #b3241f; left: 50%; top: 50%; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<div id="landing">
+  <h1>CORNER POCKET</h1>
+  <div class="rule"></div>
+  <p>A private billiards club. Eight ball, a good cue, and a table that plays true.</p>
+  <div class="btns">
+    <button id="enterVR" disabled>Enter VR</button>
+    <button id="playDesktop" class="ghost">Play on this screen</button>
+  </div>
+  <div id="note">Checking for a headset…</div>
+</div>
+<div id="power"><div class="row"><div id="spin"><div id="spinDot"></div></div><div id="bar"><div id="powerFill"></div></div></div></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
